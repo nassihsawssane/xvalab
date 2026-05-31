@@ -1,3 +1,6 @@
+"""
+Bermudan swaption pricer (GPU device function)
+"""
 import math
 import numpy as np
 from numba import cuda
@@ -5,12 +8,13 @@ from numba.cuda.random import xoroshiro128p_uniform_float32
 from products.irs.gpu import price_irs
 
 
-MAX_INNER_LS = 64
+MAX_INNER_LS = 64  # max inner paths per LS regression/can be raised depending on GPU local memory
 N_B = 3
 MAX_CALL_DATES = 16
 
 
 def swaptions_to_arrays(swaptions):
+    """cuda kernels cannot read python dicts"""
     n = len(swaptions)
     first_reset = np.empty(n, dtype=np.float32)
     reset_freq = np.empty(n, dtype=np.float32)
@@ -30,7 +34,9 @@ def swaptions_to_arrays(swaptions):
 
 @cuda.jit(device=True, inline=True)
 def cholesky_solve_Nb(BtB, Btv, x):
-    # Cholesky inline for N_B x N_B SPD system (cf. Appendix D.1 Abbas-Turki et al.)
+    # Cholesky inline for N_B x N_B SPD system
+    # Longstaff-Schwartz inner regression (N_B = 3)
+    # Standard Cholesky factorization BtB = L L^T + forward/backward solve
     L = cuda.local.array((N_B, N_B), dtype=np.float32)
     for i in range(N_B):
         for j in range(i + 1):
@@ -38,7 +44,7 @@ def cholesky_solve_Nb(BtB, Btv, x):
             for k in range(j):
                 s -= L[i, k] * L[j, k]
             if i == j:
-                if s < 1e-12:
+                if s < 1e-12:  # fallback to avoid sqrt<0
                     s = 1e-12
                 L[i, j] = math.sqrt(s)
             else:
@@ -191,4 +197,3 @@ def price_bermudan_swaption_gpu(
         discount_to_t = math.exp(-integrated_r_at_call[m])  # k=0 column
         total += discount_to_t * V[m]
     return total / M_ls
-

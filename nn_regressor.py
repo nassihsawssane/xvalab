@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+from tqdm.auto import tqdm
 
 
 class MLP(nn.Module):
@@ -74,18 +75,23 @@ class Regressor:
             a = torch.from_numpy(a).float()
         return a.to(self.device)
 
-    def train(self, features, labels):
+    def train(self, features, labels, val_features=None, val_labels=None):
         X = self.to_tensor(features)
         y = self.to_tensor(labels).view(-1, 1)
 
-        # train/val
-        # t is fixed
-        n = X.shape[0]
-        permut = torch.randperm(n, device=self.device)
-        n_val = int(n * self.val_frac)
-        idx_val, idx_tr = permut[:n_val], permut[n_val:]
-        X_tr, y_tr = X[idx_tr], y[idx_tr]
-        X_va, y_va = X[idx_val], y[idx_val]
+        if val_features is not None:  # external out-of-sample validation set (independent paths)
+            X_tr, y_tr = X, y
+            X_va = self.to_tensor(val_features)
+            y_va = self.to_tensor(val_labels).view(-1, 1)
+        else:
+            # train/val
+            # t is fixed
+            n = X.shape[0]
+            permut = torch.randperm(n, device=self.device)
+            n_val = int(n * self.val_frac)
+            idx_val, idx_tr = permut[:n_val], permut[n_val:]
+            X_tr, y_tr = X[idx_tr], y[idx_tr]
+            X_va, y_va = X[idx_val], y[idx_val]
 
         self.standardize_fit(X_tr, y_tr)
         X_tr_s = (X_tr - self.x_mean) / self.x_std
@@ -98,7 +104,11 @@ class Regressor:
         bad_epochs = 0
 
         n_tr = X_tr_s.shape[0]
-        for epoch in range(1, self.num_epochs + 1):
+        epoch_iter = range(1, self.num_epochs + 1)
+        if self.verbose:
+            epoch_iter = tqdm(epoch_iter, desc='epochs', leave=False)
+
+        for epoch in epoch_iter:
             # train
             self.model.train()
             perm_e = torch.randperm(n_tr, device=self.device)
@@ -133,14 +143,14 @@ class Regressor:
                 bad_epochs += 1
 
             if self.verbose:
-                tag = " *" if improved else ""
-                print(f"epoch {epoch:3d} | train {tr_loss:.4e} | val {val_loss:.4e}{tag}")
+                epoch_iter.set_postfix(train=f'{tr_loss:.2e}',
+                                       val=f'{val_loss:.2e}',
+                                       best=f'{best_val:.2e}')
 
             if self.early_stop and bad_epochs >= self.patience:
                 if self.verbose:
-                    print(f"early stop @ epoch {epoch} (no val improvement for {self.patience} epochs)")
+                    epoch_iter.set_description(f'early stop @ epoch {epoch}')
                 break
-
         if best_state is not None:
             self.model.load_state_dict(best_state)
 

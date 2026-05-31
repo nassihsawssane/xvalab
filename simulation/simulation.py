@@ -1,3 +1,14 @@
+"""
+Nested Monte Carlo CVA on GPU (Numba CUDA) for an IRS book and a Bermudan swaption book.
+
+Main functions:
+  - simulate_outer_market_paths           : CPU forward MC of (r, gamma) along outer paths.
+  - nested_cva_kernel                     : GPU kernel computes nested CVA for an IRS book.
+  - simulate_nested_cva                   : host launcher for nested_cva_kernel.
+  - nested_cva_swaptions_kernel           : GPU kernel computes nested CVA for a Bermudan swaption book.
+  - simulate_nested_cva_swaptions_gpu     : host launcher for nested_cva_swaptions_kernel.
+"""
+
 import math
 import numpy as np
 from numba import cuda
@@ -129,6 +140,12 @@ def nested_cva_kernel(
     nested_cva, squared_nested_cva,
     indicator_in_cva,
 ):
+    """
+    Nested MC CVA kernel for an IRS book under Vasicek (r) / CIR (gamma).
+    1 thread = 1 outer path.
+    - Indicator formulation: MtM priced at right node t_{l+1}
+    - Intensity formulation: MtM priced at left node t_l
+    """
     outer_path = cuda.grid(1)  # thread = 1 outer path
     if outer_path >= num_outer_paths:
         return
@@ -145,17 +162,15 @@ def nested_cva_kernel(
     squared_payoff_sum = 0.0
 
     for inner_path in range(num_inner_paths):
-
         # state at t_i + init
         r = X[t_i_idx + fixing_window_size - 1, 0, outer_path]
         gamma = X[t_i_idx + fixing_window_size - 1, 1, outer_path]
         for j in range(fixing_window_size):
-            fixing_rates[fixing_window_size - j - 1] = X[t_i_idx - 1 - j, 0, outer_path]
+            fixing_rates[fixing_window_size - j - 1] = X[t_i_idx + fixing_window_size - 1 - j, 0, outer_path]
         rate_integral = 0.0
         gamma_integral = 0.0
         inner_payoff = 0.0
         curr_t = t_i
-
         # indicator: exponential threshold re-simulated per inner path
         if indicator_in_cva:
             uE = xoroshiro128p_uniform_float32(rng_states, outer_path)
@@ -163,14 +178,11 @@ def nested_cva_kernel(
                 uE = 1e-10
             E_inner = -math.log(uE)
             defaulted_inner = False
-
         for step in range(t_i_idx, t_i_idx + num_steps):
-
             # intensity based formulation/ pricing at left node t_l
             if not indicator_in_cva:
                 rate_integral_left = rate_integral      
                 gamma_integral_prev = gamma_integral    
-
                 mtm_left = 0.0
                 for trade in range(n_trades):
                     first_reset = fr[trade]
@@ -178,30 +190,24 @@ def nested_cva_kernel(
                     num_resets = nr[trade]
                     notional = notio[trade]
                     swap_rate = sr[trade]
-
                     maturity = first_reset + (num_resets - 1) * reset_freq
                     # curr_t = t_l
                     if maturity + 0.1 * dt < curr_t:
                         continue
-
                     if curr_t > first_reset - 0.1 * dt:
                         m = int((curr_t - first_reset - (num_substeps - 1) * dt) / reset_freq)
                         m = int((curr_t - first_reset - m * reset_freq + dt) / (num_substeps * dt))
                         m = fixing_window_size - m
                     else:
                         m = fixing_window_size - 1
-
                     price = price_irs(
                         curr_t, r, fixing_rates[m],
                         first_reset, reset_freq, num_resets,
                         swap_rate, a, b, sigma, False, 1e-6)
                     mtm_left += notional * price
-
                 discount_left = math.exp(-rate_integral_left)
-
             # diffusion
             curr_t += dt * num_substeps             
-
             for substep in range(num_substeps):
                 # Box-Muller GPU
                 u1 = xoroshiro128p_uniform_float32(rng_states, outer_path)
@@ -214,25 +220,21 @@ def nested_cva_kernel(
                     u2 = 1e-10
                 v2 = xoroshiro128p_uniform_float32(rng_states, outer_path)
                 z2 = math.sqrt(-2.0 * math.log(u2)) * math.cos(2.0 * math.pi * v2) * sqrt_dt
-
                 dW_r = z1
                 dW_gamma = rho * z1 + rho_compl * z2
-
                 rate_integral += 0.5 * r * dt
                 r += a * (b - r) * dt + sigma * dW_r
                 rate_integral += 0.5 * r * dt
-
                 gamma_pos = max(gamma, 0.0)
                 gamma += k * (theta - gamma_pos) * dt + xi * math.sqrt(gamma_pos) * dW_gamma
                 gamma_integral += 0.5 * gamma_pos * dt
                 if gamma > 0.0:
                     gamma_integral += 0.5 * gamma * dt
-
             # shift fixing window left, add new r (state at t_l+1)
             for j in range(fixing_window_size - 1):
                 fixing_rates[j] = fixing_rates[j + 1]
             fixing_rates[fixing_window_size - 1] = r
-
+            
             if indicator_in_cva:
                 # Indicator based formualtion pricing at right node t_l+1
                 mtm = 0.0
@@ -246,14 +248,12 @@ def nested_cva_kernel(
                     maturity = first_reset + (num_resets - 1) * reset_freq
                     if maturity + 0.1 * dt < curr_t:
                         continue
-
                     if curr_t > first_reset - 0.1 * dt:
                         m = int((curr_t - first_reset - (num_substeps - 1) * dt) / reset_freq)
                         m = int((curr_t - first_reset - m * reset_freq + dt) / (num_substeps * dt))
                         m = fixing_window_size - m
                     else:
                         m = fixing_window_size - 1
-
                     price = price_irs(
                         curr_t, r, fixing_rates[m],
                         first_reset, reset_freq, num_resets,
@@ -281,7 +281,12 @@ def nested_cva_kernel(
 def simulate_nested_cva(t_i_idx, n_inner, indicator, X, default_step, irs,
                    diff_params, rho, dt, num_substeps, num_steps_total,
                    num_outer_paths, fixing_window_size, dT, seed=42):
-    
+    """
+    Host-side launcher for the nested MC CVA kernel.
+    Prepares arrays, allocates device buffers, initializes the RNG,
+    configures the CUDA grid and launches nested_cv_kernel.
+    Returns per-outer-path CVA estimates and squared estimates copied back to host.
+    """
     # prep data for gpu
     a, b, sigma, k, theta, xi = diff_params
     rho_compl = math.sqrt(1 - rho*rho)
@@ -327,6 +332,10 @@ def nested_cva_swaptions_kernel(
     nested_cva, squared_nested_cva,
     indicator_in_cva,
 ):
+    """
+    Nested MC CVA kernel for a Bermudan swaption book. 1 thread = 1 outer path.
+    Inner LS pricing via `price_bermudan_swaption_gpu`. Supports indicator and intensity formulations.
+    """
     outer_path = cuda.grid(1)
     if outer_path >= num_outer_paths:
         return
@@ -409,6 +418,12 @@ def simulate_nested_cva_swaptions_gpu(
     num_outer_paths, num_inner_ls_paths, fixing_window_size,
     indicator_in_cva=False, seed=42,
 ):
+    """
+    Host-side launcher for the Bermudan-swaption nested MC CVA kernel.
+    Converts swaption dicts to arrays, allocates device buffers, initializes the RNG,
+    configures the CUDA grid and launches nested_cva_swaptions_kernel.
+    Returns per-outer-path CVA estimates and squared estimates copied back to host.
+    """
     a, b, sigma, k, theta, xi = diff_params
     rho_compl = math.sqrt(1 - rho * rho)
     fr, rf, nr, no, sr, st = swaptions_to_arrays(swaptions)

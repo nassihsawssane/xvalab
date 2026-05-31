@@ -1,3 +1,14 @@
+
+"""
+Nested Monte Carlo CVA on CPU (NumPy reference) for an IRS book and a Bermudan swaption book.
+Bermudan swaptions are priced by Longstaff-Schwartz backward induction (price_book_swaptions).
+
+Main functions:
+  - simulate_outer_market_paths     : forward MC of (r, gamma) along outer paths.
+  - simulate_nested_cva             : nested CVA for an IRS book (or single bermudan via product_type).
+  - simulate_nested_cva_swaptions   : nested CVA for a Bermudan swaption book.
+"""
+
 import math
 import numpy as np
 from products.irs.cpu import price_irs
@@ -7,7 +18,7 @@ from utils import box_muller
 
 def compute_fixing_window_size(irs, dt, dT):
     """Sliding-window size needed to store past short rates at reset dates
-    cf 'Market and Credit Model in Continuous Time' Appendix B in[2] in references.
+    cf 'Market and Credit Model in Continuous Time' Appendix B in [2] in references.
     """
     max_reset_freq = max(t['reset_freq'] for t in irs)
     return max(int((max_reset_freq + dt) / dT), 1)
@@ -119,75 +130,50 @@ def simulate_nested_cva(
 
         if defaulted[outer_path]:
             continue
-
         sum_payoff = 0.0
         squared_payoff_sum = 0.0
-
         for inner_path in range(num_inner_paths):
-
             fixing_rates = np.empty(fixing_window_size)
-
             r = X[t_i_idx + fixing_window_size - 1, 0, outer_path]
             gamma = X[t_i_idx + fixing_window_size - 1, 1, outer_path]
-
             for j in range(fixing_window_size):
                 fixing_rates[fixing_window_size - j - 1] = X[t_i_idx - 1 - j, 0, outer_path]
-
             rate_integral = np.float32(0.0)
             gamma_integral = np.float32(0.0)
-
             inner_payoff = np.float32(0.0)
             curr_t = t_i
-
             if indicator_in_cva:
                 E_inner = -math.log(max(rng.random(dtype=np.float32), 1e-10))
                 defaulted_inner = False
-
             for step in range(t_i_idx, t_i_idx + num_steps):
-
                 if not indicator_in_cva:
-
                     curr_t_left = curr_t
-
                     r_left = r
                     rate_integral_left = rate_integral
-
                     fixing_rates_left = fixing_rates.copy()
-
                     mtm_left = np.float32(0.0)
-
                     if product_type == 'swap':
-
                         for trade in irs:
-
                             first_reset = trade['first_reset']
                             reset_freq = trade['reset_freq']
                             num_resets = trade['num_resets']
                             notional = trade['notional']
                             swap_rate = trade['swap_rate']
-
                             maturity = first_reset + (num_resets - 1) * reset_freq
-
                             if maturity + 0.1 * dt < curr_t_left:
                                 continue
-
                             if curr_t_left > first_reset - 0.1 * dt:
-
                                 m = int(
                                     (curr_t_left - first_reset - (num_substeps - 1) * dt)
                                     / reset_freq
                                 )
-
                                 m = int(
                                     (curr_t_left - first_reset - m * reset_freq + dt)
                                     / (num_substeps * dt)
                                 )
-
                                 m = fixing_window_size - m
-
                             else:
                                 m = fixing_window_size - 1
-
                             price = price_irs(
                                 t=curr_t_left,
                                 r=r_left,
@@ -200,11 +186,9 @@ def simulate_nested_cva(
                                 b=b,
                                 sigma=sigma,
                             )
-
                             mtm_left += notional * price
 
                     elif product_type == 'bermudan':
-
                         mtm_left = bermudan_swaption_mtm(
                             curr_t_left,
                             r_left,
@@ -217,80 +201,53 @@ def simulate_nested_cva(
                             dt,
                             rng,
                         )
-
                     discount_left = math.exp(-rate_integral_left)
 
                 curr_t += dt * num_substeps
-
                 gamma_integral_prev = gamma_integral
-
                 for substep in range(num_substeps):
-
                     z1 = box_muller(rng, sqrt_dt)
                     z2 = box_muller(rng, sqrt_dt)
-
                     dW_r = z1
                     dW_gamma = rho * z1 + rho_compl * z2
-
                     rate_integral += 0.5 * r * dt
-
                     r += a * (b - r) * dt + sigma * dW_r
-
                     rate_integral += 0.5 * r * dt
-
                     gamma_pos = max(gamma, 0.0)
-
                     gamma += (
                         k * (theta - gamma_pos) * dt
                         + xi * math.sqrt(gamma_pos) * dW_gamma
                     )
-
                     gamma_integral += 0.5 * gamma_pos * dt
-
                     if gamma > 0:
                         gamma_integral += 0.5 * gamma * dt
-
                 for j in range(fixing_window_size - 1):
                     fixing_rates[j] = fixing_rates[j + 1]
-
                 fixing_rates[fixing_window_size - 1] = r
-
                 if indicator_in_cva:
-
                     mtm = np.float32(0.0)
-
                     if product_type == 'swap':
-
                         for trade in irs:
-
                             first_reset = trade['first_reset']
                             reset_freq = trade['reset_freq']
                             num_resets = trade['num_resets']
                             notional = trade['notional']
                             swap_rate = trade['swap_rate']
-
                             maturity = first_reset + (num_resets - 1) * reset_freq
-
                             if maturity + 0.1 * dt < curr_t:
                                 continue
-
                             if curr_t > first_reset - 0.1 * dt:
-
                                 m = int(
                                     (curr_t - first_reset - (num_substeps - 1) * dt)
                                     / reset_freq
                                 )
-
                                 m = int(
                                     (curr_t - first_reset - m * reset_freq + dt)
                                     / (num_substeps * dt)
                                 )
-
                                 m = fixing_window_size - m
-
                             else:
                                 m = fixing_window_size - 1
-
                             price = price_irs(
                                 t=curr_t,
                                 r=r,
@@ -303,11 +260,8 @@ def simulate_nested_cva(
                                 b=b,
                                 sigma=sigma,
                             )
-
                             mtm += notional * price
-
                     elif product_type == 'bermudan':
-
                         mtm = bermudan_swaption_mtm(
                             curr_t,
                             r,
@@ -320,29 +274,21 @@ def simulate_nested_cva(
                             dt,
                             rng,
                         )
-
                     discount = math.exp(-rate_integral)
-
                     if (not defaulted_inner) and (gamma_integral > E_inner):
-
                         defaulted_inner = True
-
                         if mtm > 0:
                             inner_payoff = discount * mtm
-
                 else:
-
                     default_prob = (
                         math.exp(-gamma_integral_prev)
                         - math.exp(-gamma_integral)
                     )
-
                     increment = (
                         discount_left
                         * max(mtm_left, 0.0)
                         * default_prob
                     )
-
                     if increment > 0:
                         inner_payoff += increment
 

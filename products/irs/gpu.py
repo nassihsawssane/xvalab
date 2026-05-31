@@ -1,3 +1,7 @@
+"""
+IRS pricing framework based on "Market and Credit Model in Continuous Time" Appendix B in [2].
+Closed-form IRS pricer under Vasicek short rate, GPU device functions (Numba CUDA).
+"""
 import math
 from numba import cuda
 

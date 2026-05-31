@@ -1,8 +1,20 @@
-# XVA Analysis: Numerical Methods and Machine Learning Approaches
+# Applications of XVA &nalysis and numerical Methods
 
-Academic project developed as part of the course *XVA Analysis and the Embedded Probabilistic, Risk Measure, and Machine Learning Issues* by Stéphane Crépey (M2MO).
+This repository is an academic project developed as part of the course *XVA Analysis and the Embedded Probabilistic, Risk Measure, and Machine Learning Issues* by Stéphane Crépey (M2MO).
 
-This project investigates the numerical computation of valuation adjustments (XVA). (in progress)
+It explores selected applications of CVA analysis through their numerical implementation. 
+It served as an opportunity to put into practice the methods covered in the course, namely nested Monte Carlo for CVA and neural-network regression for path-wise XVAs and to gain hands-on experience with GPU programming via Numba CUDA. The implementations follow established methods from the literature, and the relevant references are listed below.
+
+
+
+## Repository structure
+
+- The two main deliverables are the notebooks `1_nested_cva_estimator.ipynb` and `2_nn_cva_estimator.ipynb` which present respectively the nested Monte Carlo CVA estimator and the neural-network CVA estimator on the IRS and Bermudan swaption books. 
+- They both rely on the underlying modules. The product pricers live in `products/` with an `irs/` folder for the closed-form IRS pricer under Vasicek and a `swaption/` folder for the Bermudan swaption pricer via Longstaff-Schwartz each split into a `cpu.py` reference and a `gpu.py` device function. 
+- The market simulation and the nested-MC CVA themselves live in `simulation/` again with a CPU reference (`simulation_cpu.py`) and a GPU version (`simulation.py`) together with the timing and confidence-interval helpers in `stats.py`.
+- The neural network framework is handled by `cva_nn_estimator.py` which wraps the estimator as the `LearnedCVA` class and by `nn_regressor.py` which provides the generic regressor and training loop with, `utils.py` collecting helpers.
+All simulations in the notebooks rely on the GPU versions of these modules. The CPU files serve as references for the consistency checks documented in `gpu_design_notes.ipynb`.
+Two additional companion notebooks document specific aspects of the implementation: `gpu_design_notes.ipynb` (GPU design choices and CPU/GPU consistency checks) and `nn_architecture.ipynb` (architecture tuning of the regressor).
 
 
 ## References
@@ -49,3 +61,7 @@ This project investigates the numerical computation of valuation adjustments (XV
 <a id="fg"></a>
 **[11]** R. Ferguson, A. Green. 
 *Deeply Learning Derivatives.* Preprint, version 2.1, 14 October 2018. arXiv:1809.02233.
+
+<a id="markall"></a>
+**[12]** G. Markall.
+*Numba for CUDA Programmers.* NVIDIA, course materials (5 sessions), 2021.

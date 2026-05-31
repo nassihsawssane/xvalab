@@ -1,3 +1,6 @@
+"""
+Bermudan swaption pricer (CPU reference implementation)
+"""
 import numpy as np
 from utils import vec_box_muller
 from products.irs.cpu import price_irs

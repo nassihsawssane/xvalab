@@ -3,6 +3,7 @@ from numba import cuda
 from nn_regressor import Regressor
 from products.irs.gpu import price_irs
 from simulation.simulation import irs_to_arrays
+from tqdm.auto import tqdm
 
 
 @cuda.jit
@@ -68,9 +69,10 @@ def compute_cva_labels(
     num_outer_paths,
     formulation='intensity',
 ):
+    """Compute pathwise CVA labels for NN regression, for all time steps and paths using GPU-accelerated MtM computation."""
     a, b, sigma, _, _, _ = diff_params
 
-    # prep + transfer data to gpu
+    # prep + device transfer for GPU
     first_resets, reset_freqs, n_resets, notionals, swap_rates = irs_to_arrays(irs)
     X_gpu = cuda.to_device(X)
     first_resets_gpu = cuda.to_device(first_resets)
@@ -93,23 +95,24 @@ def compute_cva_labels(
         mtm_gpu,
     )
     cuda.synchronize()
-    mtm = mtm_gpu.copy_to_host()  # gpu to cpu
+    mtm = mtm_gpu.copy_to_host()  # device to host once MtM cube is built
 
     # computing labels for all t
     labels = np.zeros((num_steps_total + 1, num_outer_paths), dtype=np.float32)
     cumulative_cva = np.zeros(num_outer_paths, dtype=np.float32)
 
     if formulation == 'intensity':
+        # left-Euler scheme where MtM evaluated at t_l
         for step in range(num_steps_total - 1, -1, -1):
             idx_now = (fixing_window_size - 1) if step == 0 else (fixing_window_size + step - 1)
             idx_next = fixing_window_size + step
             rate_integral_diff = rate_integral_path[idx_next] - rate_integral_path[idx_now]
             gamma_integral_diff = gamma_integral_path[idx_next] - gamma_integral_path[idx_now]
-            df_r = np.exp(-rate_integral_diff)
-            df_r_d = np.exp(-(rate_integral_diff + gamma_integral_diff))
-            mtm_next = np.maximum(mtm[step + 1], 0.0)  # pos exposure 
-            incr = mtm_next * (df_r - df_r_d)
-            cumulative_cva = cumulative_cva * df_r_d + incr
+            df_r_d = np.exp(-(rate_integral_diff + gamma_integral_diff)) 
+            mtm_left = np.maximum(mtm[step], 0.0)  # pos exposure 
+            incr = mtm_left * (1.0 - np.exp(-gamma_integral_diff))
+            already_def = (default_step != -1) & (default_step < step) # survival mask
+            cumulative_cva = np.where(already_def, 0.0, cumulative_cva * df_r_d + incr).astype(np.float32)
             labels[step] = cumulative_cva
 
     else:  # indicator based formulation
@@ -117,7 +120,7 @@ def compute_cva_labels(
             idx_now = (fixing_window_size - 1) if step == 0 else (fixing_window_size + step - 1)
             idx_next = fixing_window_size + step
             rate_integral_diff = rate_integral_path[idx_next] - rate_integral_path[idx_now]
-            df_r = np.exp(-rate_integral_diff)
+            df_r = np.exp(-rate_integral_diff) # beta_{t_{l+1}} / beta_{t_l} 
             m_next = np.maximum(mtm[step + 1], 0.0)
             is_default_here = (default_step == step) & (default_step != -1)
             incr = np.where(is_default_here, df_r * m_next, 0.0).astype(np.float32)
@@ -166,21 +169,28 @@ class LearnedCVA:
 
         self.states_by_t = [None] * (num_steps_total + 1)
 
-    def fit(self, features_by_t, labels):  # backward over dates
-        for t in range(self.num_steps_total, -1, -1):
+    def fit(self, features_by_t, labels, formulation=None):
+        title = 'Run backward NN training (CVA'
+        if formulation is not None:
+            title += f', {formulation}'
+            title += ')'
+        time_bar = tqdm(range(self.num_steps_total, -1, -1), desc=title)
+        for t in time_bar:
             X_t = features_by_t[t]
             y_t = labels[t]  # cva labels at date t
             std_t = float(y_t.std())
 
             if std_t < self.min_label_var:  # below this label variance we skip nn regression and use mean
                 self.states_by_t[t] = ('const', float(y_t.mean()))
+                time_bar.set_postfix(t=t, mode='const')
                 continue
 
             if t == 0:
                 self.states_by_t[t] = ('const', float(y_t.mean()))
+                time_bar.set_postfix(t=t, mode='const')
                 continue
 
-            print(f"[t={t}] training NN")
+            time_bar.set_postfix(t=t, mode='NN')
             self.regressor.train(X_t, y_t)
             self.states_by_t[t] = ('nn', self.regressor.get_state())
 
